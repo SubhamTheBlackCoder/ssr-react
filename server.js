@@ -2,57 +2,61 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function createServer() {
   const app = express();
+  const isProd = process.env.NODE_ENV === 'production';
 
-  // Start Vite in middleware mode
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: 'custom'
-  });
+  let vite;
+  let template;
+  let render;
 
-  app.use(vite.middlewares);
+  if (isProd) {
+    app.use(express.static(path.join(__dirname, 'dist/client'), { index: false }));
+    template = fs.readFileSync(path.join(__dirname, 'dist/client/index.html'), 'utf-8');
+    const ssrModule = await import(path.join(__dirname, 'dist/server/entry-server.js'));
+    render = ssrModule.render;
+  } else {
+    const { createServer: createViteServer } = await import('vite');
+    vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'custom',
+    });
+    app.use(vite.middlewares);
+    template = fs.readFileSync(path.resolve(__dirname, 'index.html'), 'utf-8');
+  }
 
-  // ✅ Define selective SSR routes
-  const ssrRoutes = ['/','/about'];
+  const ssrRoutes = ['/', '/about'];
 
   app.get('*', async (req, res, next) => {
     const url = req.originalUrl;
-
-    // ✅ Match if route starts with any SSR route
-    const shouldSSR = ssrRoutes.some(route =>
-      url === route || url.startsWith(route + '/')
+    const shouldSSR = ssrRoutes.some(route => 
+      url === route || url.startsWith(`${route}/`)
     );
 
     try {
-      // 1. Read HTML template
-      let template = fs.readFileSync(
-        path.resolve(__dirname, 'index.html'),
-        'utf-8'
-      );
-
-      // 2. Transform using Vite plugins (e.g., HMR, React macros)
-      template = await vite.transformIndexHtml(url, template);
-
       let appHtml = '';
+      let html = template;
 
-      // 3. Only SSR for matched routes
-      if (shouldSSR) {
-        const { render } = await vite.ssrLoadModule('/src/entry-server.jsx');
-        appHtml = await render(url);
+      if (!isProd) {
+        html = await vite.transformIndexHtml(url, html);
       }
 
-      // 4. Inject rendered HTML into the template
-      const html = template.replace(`<!--ssr-outlet-->`, appHtml);
+      if (shouldSSR) {
+        if (isProd) {
+          appHtml = await render(url);
+        } else {
+          const { render: devRender } = await vite.ssrLoadModule('/src/entry-server.jsx');
+          appHtml = devRender(url);
+        }
+      }
 
-      // 5. Return final HTML
+      html = html.replace('<!--ssr-outlet-->', appHtml);
       res.status(200).set({ 'Content-Type': 'text/html' }).end(html);
     } catch (e) {
-      vite.ssrFixStacktrace(e);
+      if (!isProd) vite.ssrFixStacktrace(e);
       console.error('❌ SSR Error:', e);
       next(e);
     }
@@ -60,7 +64,8 @@ async function createServer() {
 
   const PORT = process.env.PORT || 5173;
   app.listen(PORT, () => {
-    console.log(`✅ SSR server running at http://localhost:${PORT}`);
+    console.log(`✅ Server running at http://localhost:${PORT}`);
+    console.log(`Mode: ${isProd ? 'production' : 'development'}`);
   });
 }
 
